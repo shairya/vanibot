@@ -1,10 +1,10 @@
 import pgvector from "pgvector";
 import { query } from "../db.js";
-import { embed } from "./embeddings.js";
+import { embed, vectorSearchAvailable } from "./embeddings.js";
 
 export type RetrievedChunk = { id: number; content: string; title: string; score: number };
 
-// Hybrid search: Postgres full-text + pgvector cosine, merged with reciprocal rank fusion.
+// Hybrid search: Postgres full-text + pgvector cosine (when available), merged with reciprocal rank fusion.
 export async function retrieve(tenantId: string, botId: string, question: string, k = 6): Promise<RetrievedChunk[]> {
   const keyword = await query<{ id: number; content: string; title: string }>(
     `SELECT c.id, c.content, d.title
@@ -34,7 +34,7 @@ export async function retrieve(tenantId: string, botId: string, question: string
   }
 
   let semantic: typeof keyword = [];
-  const vectors = await embed([question], "query").catch(() => null);
+  const vectors = (await vectorSearchAvailable()) ? await embed([question], "query").catch(() => null) : null;
   if (vectors) {
     semantic = await query(
       `SELECT c.id, c.content, d.title

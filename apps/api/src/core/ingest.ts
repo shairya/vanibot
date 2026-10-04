@@ -3,7 +3,7 @@ import mammoth from "mammoth";
 import { PDFParse } from "pdf-parse";
 import pgvector from "pgvector";
 import { one, query, withTransaction } from "../db.js";
-import { embed } from "./embeddings.js";
+import { embed, vectorSearchAvailable } from "./embeddings.js";
 import { registerJobHandler } from "./jobs.js";
 
 export async function extractText(filename: string, data: Buffer): Promise<string> {
@@ -84,14 +84,25 @@ export async function ingestDocument(documentId: string) {
     }
     const pieces = chunkText(text);
     if (pieces.length === 0) throw new Error("No text could be extracted from this document.");
-    const vectors = await embed(pieces, "document");
+    const withVectors = await vectorSearchAvailable();
+    const vectors = withVectors ? await embed(pieces, "document") : null;
     await withTransaction(async (client) => {
       await client.query("DELETE FROM chunks WHERE document_id = $1", [documentId]);
       for (let i = 0; i < pieces.length; i++) {
-        await client.query(
-          "INSERT INTO chunks(tenant_id, bot_id, document_id, ordinal, content, embedding) VALUES ($1, $2, $3, $4, $5, $6)",
-          [doc.tenant_id, doc.bot_id, documentId, i, pieces[i], vectors ? pgvector.toSql(vectors[i]) : null],
-        );
+        if (withVectors) {
+          await client.query(
+            "INSERT INTO chunks(tenant_id, bot_id, document_id, ordinal, content, embedding) VALUES ($1, $2, $3, $4, $5, $6)",
+            [doc.tenant_id, doc.bot_id, documentId, i, pieces[i], vectors ? pgvector.toSql(vectors[i]) : null],
+          );
+        } else {
+          await client.query("INSERT INTO chunks(tenant_id, bot_id, document_id, ordinal, content) VALUES ($1, $2, $3, $4, $5)", [
+            doc.tenant_id,
+            doc.bot_id,
+            documentId,
+            i,
+            pieces[i],
+          ]);
+        }
       }
       await client.query("UPDATE documents SET status = 'ready', chunk_count = $2 WHERE id = $1", [documentId, pieces.length]);
     });

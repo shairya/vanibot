@@ -10,7 +10,8 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "migrate": "tsx --env-file-if-exists=../../.env src/migrate.ts",
     "seed": "tsx --env-file-if-exists=../../.env src/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "db:setup": "tsx --env-file-if-exists=../../.env src/setup-db.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.131.0",

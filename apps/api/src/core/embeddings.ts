@@ -1,7 +1,18 @@
 import { config } from "../config.js";
+import { query } from "../db.js";
 
-// Voyage AI embeddings (1024 dims). Optional: without a key, retrieval uses keyword search only.
+// Voyage AI embeddings (1024 dims). Optional: without a key, or without pgvector in the database,
+// retrieval uses keyword search only.
 export const embeddingsEnabled = () => Boolean(config.voyage.apiKey);
+
+let vectorColumn: Promise<boolean> | null = null;
+/** True when the database has pgvector and the chunks.embedding column (see `pnpm db:setup`). */
+export function vectorSearchAvailable(): Promise<boolean> {
+  vectorColumn ??= query("SELECT 1 FROM information_schema.columns WHERE table_name = 'chunks' AND column_name = 'embedding'")
+    .then((rows) => rows.length > 0)
+    .catch(() => false);
+  return vectorColumn;
+}
 
 export async function embed(texts: string[], inputType: "document" | "query"): Promise<number[][] | null> {
   if (!embeddingsEnabled() || texts.length === 0) return null;

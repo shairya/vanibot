@@ -38,9 +38,9 @@ Templates today: General business, Medical bill discounts, Insurance, Loans and 
  └──────┬──────────────────────┬─────────────────────┬────────────────────────┘
  ┌──────▼──────────┐   ┌───────▼────────┐   ┌────────▼────────┐
  │ Postgres 16     │   │ Claude API     │   │ Sarvam AI       │
- │ + pgvector      │   │ (+ Voyage AI   │   │ speech-to-text, │
- │ row-level       │   │ embeddings,    │   │ text-to-speech  │
- │ security        │   │ optional)      │   └─────────────────┘
+ │ (+ pgvector,    │   │ (+ Voyage AI   │   │ speech-to-text, │
+ │  optional) RLS  │   │ embeddings,    │   │ text-to-speech  │
+ │                 │   │ optional)      │   └─────────────────┘
  └─────────────────┘   └────────────────┘
 ```
 
@@ -98,7 +98,7 @@ None in the pilot; the vanibot team assigns plans. Razorpay comes next, then int
 - Lending, insurance and banking templates forbid approving loans, confirming coverage, or asking for OTPs and account numbers.
 
 ## Next phases
-1. Deploy (likely a Hostinger VPS in India): Docker images, HTTPS domain, backups
+1. Deploy on a Hostinger VPS in India: PostgreSQL with pgvector, Node, HTTPS domain, backups
 2. Phone calls (realtime voice with an Indian telephony provider)
 3. Razorpay subscriptions
 4. WhatsApp templates for follow-ups, team members and roles per company, audit log

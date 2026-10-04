@@ -1,6 +1,6 @@
 -- vanibot initial schema. Every tenant-owned row carries tenant_id; all queries filter on it.
-CREATE EXTENSION IF NOT EXISTS vector;
-CREATE EXTENSION IF NOT EXISTS pgcrypto;
+-- pgvector is optional: `pnpm db:setup` installs it when available, and the embedding column is added below only then.
+-- gen_random_uuid() is built into PostgreSQL 13 and later.
 
 CREATE TABLE tenants (
   id            uuid PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -64,12 +64,17 @@ CREATE TABLE chunks (
   document_id uuid NOT NULL REFERENCES documents(id) ON DELETE CASCADE,
   ordinal     int NOT NULL,
   content     text NOT NULL,
-  tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED,
-  embedding   vector(1024)
+  tsv         tsvector GENERATED ALWAYS AS (to_tsvector('english', content)) STORED
 );
 CREATE INDEX chunks_bot_idx ON chunks(tenant_id, bot_id);
 CREATE INDEX chunks_tsv_idx ON chunks USING gin(tsv);
-CREATE INDEX chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+DO $$
+BEGIN
+  IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'vector') THEN
+    ALTER TABLE chunks ADD COLUMN embedding vector(1024);
+    CREATE INDEX chunks_embedding_idx ON chunks USING hnsw (embedding vector_cosine_ops);
+  END IF;
+END $$;
 
 CREATE TABLE conversations (
   id          uuid PRIMARY KEY DEFAULT gen_random_uuid(),

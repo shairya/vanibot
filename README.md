@@ -23,7 +23,6 @@ apps/
   dashboard/  React app for companies and the vanibot team
   widget/     Embeddable chat + voice widget (builds to widget.js)
   website/    vanibot marketing website (home, pricing, demos, book a demo)
-docker/       Database setup (creates the restricted "vanibot" database role)
 docs/         Architecture
 ```
 
@@ -31,52 +30,64 @@ docs/         Architecture
 
 ## Run it on your computer
 
+These steps are written for **Windows** (PowerShell). Mac and Linux work the same way; use your usual terminal.
+
 ### 1. Install the tools (one time)
 
 | Tool | Why | Get it |
 |---|---|---|
-| Node.js 20 or newer | Runs the app | https://nodejs.org (LTS) |
-| pnpm | Installs packages | Run `corepack enable` after installing Node |
-| Docker Desktop | Runs the database | https://www.docker.com/products/docker-desktop |
+| Node.js 20 or newer (LTS) | Runs the app | https://nodejs.org |
+| Git | Downloads the code | https://git-scm.com/download/win |
+| PostgreSQL 16 or 17 | The database | https://www.postgresql.org/download/windows/ (EDB installer) |
 | A Claude API key | The AI | https://console.anthropic.com > API Keys |
 
-```bash
+When the PostgreSQL installer asks:
+- **Password for the `postgres` user:** choose one using only letters and digits, and keep it. You need it in step 3.
+- **Port:** keep `5432`.
+- **Stack Builder** at the end: skip it.
+
+Then open **PowerShell as Administrator** once and run `corepack enable` (this installs `pnpm`). Close it and open a normal PowerShell. Check:
+
+```powershell
 node -v        # v20 or higher
 pnpm -v
-docker -v
 ```
-
-> No Docker? Install PostgreSQL 16 with the pgvector extension, then run the commands in `docker/initdb/01-app-role.sh` as the postgres superuser. The app must connect as the non-superuser `vanibot` role, otherwise row-level security is skipped.
 
 ### 2. Get the code
 
-```bash
+```powershell
 git clone https://github.com/shairya/vanibot.git
 cd vanibot
+git checkout vanibot-phase-1
 ```
 
 ### 3. Configure
 
-```bash
-cp .env.example .env
+```powershell
+copy .env.example .env
+notepad .env
 ```
 
-Open `.env` and set:
+Set these lines and save:
 
+- `DATABASE_ADMIN_URL`: replace `YOUR_POSTGRES_PASSWORD` with the password from step 1.
 - `ANTHROPIC_API_KEY`: your Claude API key.
-- `JWT_SECRET`: any long random string (for example the output of `openssl rand -hex 32`).
-- `APP_ENCRYPTION_KEY`: the output of `openssl rand -hex 32`. It encrypts WhatsApp access tokens.
+- `JWT_SECRET` and `APP_ENCRYPTION_KEY`: run this twice and paste one result into each:
+  `node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"`
+- `SARVAM_API_KEY`: your Sarvam key (for voice notes). `.env` never goes to GitHub, so keys are safe here.
 
-Everything else can stay empty for now. Without WhatsApp keys, WhatsApp runs in test mode (replies are written to the API log). Without a Sarvam key, voice notes get a polite "please type your question" reply.
+Leave `DATABASE_URL` as it is. Without WhatsApp keys, WhatsApp runs in test mode (replies are written to the terminal).
 
-### 4. Install, start the database, and load the starting data
+### 4. Install and create the database
 
-```bash
+```powershell
 pnpm install
-pnpm db:up          # starts Postgres + pgvector in Docker and creates the "vanibot" role
-pnpm db:migrate     # creates the tables and the isolation rules
+pnpm db:setup       # creates the "vanibot" database and its own restricted login
+pnpm db:migrate     # creates the tables and the rules that keep companies' data apart
 pnpm seed           # vanibot team admin, the OXXY pilot company, and the website demo bots
 ```
+
+`pnpm db:setup` also turns on **pgvector** if it is installed. It's optional: without it, knowledge search uses keywords, which works well for small document sets. (pgvector is easy to add on the Hostinger server later; on Windows it needs a separate build, so skip it for now.)
 
 `pnpm seed` prints the logins and demo links:
 
@@ -156,7 +167,7 @@ const ok = timingSafeEqual(Buffer.from(expected), Buffer.from(req.headers["x-van
 
 ## Better search (optional)
 
-Without a key the bot searches knowledge by keywords. For meaning-based search add a [Voyage AI](https://www.voyageai.com) key as `VOYAGE_API_KEY`, restart, and re-add documents.
+Without it the bot searches knowledge by keywords. For meaning-based search you need both pgvector in PostgreSQL (run `pnpm db:setup` again after installing it) and a [Voyage AI](https://www.voyageai.com) key as `VOYAGE_API_KEY`. Restart and re-add documents.
 
 ## Customising
 
@@ -173,15 +184,15 @@ Without a key the bot searches knowledge by keywords. For meaning-based search a
 | `pnpm typecheck` | Type-checks all apps |
 | `pnpm build` | Production build of all apps |
 | `pnpm db:migrate` | Applies new database migrations |
-| `docker compose down` | Stops the database (data is kept) |
-| `docker compose down -v` | Stops the database and **deletes** all data |
+| `pnpm db:setup` | Creates the database and app login (safe to run again) |
 
 ## Troubleshooting
 
 - **"Missing required environment variable"**: you skipped step 3, or `.env` is not in the `vanibot` folder.
-- **"bypasses row-level security" warning**: the API is connecting as a superuser. Use `postgres://vanibot:vanibot@localhost:5432/vanibot`. In production the API refuses to start in this case.
-- **Database created before this version**: the `vanibot` role is only created on a fresh volume. Run `docker compose down -v` (deletes local data), then `pnpm db:up`, `pnpm db:migrate`, `pnpm seed`.
-- **`ECONNREFUSED 127.0.0.1:5432`**: start Docker Desktop, then `pnpm db:up`.
+- **"bypasses row-level security" warning**: the API is connecting as a superuser. Keep `DATABASE_URL=postgres://vanibot:vanibot@localhost:5432/vanibot`. In production the API refuses to start in this case.
+- **`pnpm db:setup` says "password authentication failed"**: the password in `DATABASE_ADMIN_URL` doesn't match the one you chose when installing PostgreSQL.
+- **`ECONNREFUSED 127.0.0.1:5432`**: PostgreSQL isn't running. On Windows open **Services**, find `postgresql-x64-16` (or 17) and click Start.
+- **`pnpm` is not recognized**: run `corepack enable` in PowerShell as Administrator, or `npm install -g pnpm`.
 - **WhatsApp verification fails**: `WHATSAPP_VERIFY_TOKEN` in `.env` must match what you typed in Meta, and `PUBLIC_URL` must be the tunnel URL.
 - **No WhatsApp reply**: check the API log. "dry run" means the bot has no access token saved; "unknown number" means the phone number ID on the bot doesn't match.
 - **The bot says "I'm having trouble right now"**: usually a missing or wrong `ANTHROPIC_API_KEY`.
