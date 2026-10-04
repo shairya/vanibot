@@ -1,28 +1,46 @@
 import { one, query } from "../db.js";
 
-export type PlanId = "trial" | "starter" | "growth" | "business";
+/** What a company can switch on. 'voice' covers voice in the website widget and WhatsApp voice notes (phone calls later). */
+export type ChannelId = "web" | "whatsapp" | "voice";
+export const ALL_CHANNELS: ChannelId[] = ["web", "whatsapp", "voice"];
+
+export type PlanId = "pilot" | "chat" | "voice" | "chat_voice";
 
 export type Plan = {
   id: PlanId;
   name: string;
   priceLabel: string;
+  tagline: string;
+  channels: ChannelId[];
   bots: number;
   conversationsPerMonth: number;
-  voiceMinutesPerMonth: number;
+  voiceNotesPerMonth: number;
   documents: number;
   removeBranding: boolean;
 };
 
-// Placeholder limits and prices. Real prices live in Stripe; set the price IDs in .env.
+// Placeholder prices for the website. There are no online payments in the pilot; vanibot admins assign plans by hand.
 export const plans: Record<PlanId, Plan> = {
-  trial: { id: "trial", name: "Free trial", priceLabel: "14 days free", bots: 1, conversationsPerMonth: 200, voiceMinutesPerMonth: 30, documents: 20, removeBranding: false },
-  starter: { id: "starter", name: "Starter", priceLabel: "$49/mo", bots: 1, conversationsPerMonth: 1000, voiceMinutesPerMonth: 100, documents: 50, removeBranding: false },
-  growth: { id: "growth", name: "Growth", priceLabel: "$199/mo", bots: 3, conversationsPerMonth: 5000, voiceMinutesPerMonth: 1000, documents: 300, removeBranding: true },
-  business: { id: "business", name: "Business", priceLabel: "$599/mo", bots: 10, conversationsPerMonth: 25000, voiceMinutesPerMonth: 5000, documents: 2000, removeBranding: true },
+  pilot: {
+    id: "pilot", name: "Pilot", priceLabel: "Free during pilot", tagline: "Everything on, for pilot companies",
+    channels: ["web", "whatsapp", "voice"], bots: 3, conversationsPerMonth: 2000, voiceNotesPerMonth: 1000, documents: 200, removeBranding: true,
+  },
+  chat: {
+    id: "chat", name: "Chat", priceLabel: "₹2,999/month", tagline: "Website chat and WhatsApp text",
+    channels: ["web", "whatsapp"], bots: 1, conversationsPerMonth: 1000, voiceNotesPerMonth: 0, documents: 50, removeBranding: false,
+  },
+  voice: {
+    id: "voice", name: "Voice", priceLabel: "₹4,999/month", tagline: "WhatsApp voice notes and website voice",
+    channels: ["voice"], bots: 1, conversationsPerMonth: 1000, voiceNotesPerMonth: 2000, documents: 50, removeBranding: false,
+  },
+  chat_voice: {
+    id: "chat_voice", name: "Chat + Voice", priceLabel: "₹6,999/month", tagline: "Every channel, more volume",
+    channels: ["web", "whatsapp", "voice"], bots: 3, conversationsPerMonth: 5000, voiceNotesPerMonth: 5000, documents: 300, removeBranding: true,
+  },
 };
 
 export function getPlan(id: string): Plan {
-  return plans[id as PlanId] ?? plans.trial;
+  return plans[id as PlanId] ?? plans.pilot;
 }
 
 export async function recordUsage(tenantId: string, botId: string | null, kind: string, quantity = 1, inputTokens = 0, outputTokens = 0) {
@@ -47,7 +65,7 @@ export async function monthUsage(tenantId: string) {
   return {
     conversations: get("conversation"),
     messages: get("message"),
-    voiceMinutes: get("voice_minute"),
+    voiceNotes: get("voice_note"),
     inputTokens: rows.reduce((s, r) => s + Number(r.input_tokens), 0),
     outputTokens: rows.reduce((s, r) => s + Number(r.output_tokens), 0),
   };
@@ -55,15 +73,49 @@ export async function monthUsage(tenantId: string) {
 
 export type LimitCheck = { ok: true } | { ok: false; reason: string };
 
-/** Checks whether a tenant may start a new conversation on the given channel. */
-export async function canStartConversation(tenantId: string, channel: string): Promise<LimitCheck> {
-  const tenant = await one("SELECT plan, plan_status, trial_ends_at FROM tenants WHERE id = $1", [tenantId]);
+type TenantLimits = { plan: string; status: string; channels: ChannelId[] };
+
+async function loadTenant(tenantId: string) {
+  return one<TenantLimits>("SELECT plan, status, channels FROM tenants WHERE id = $1", [tenantId]);
+}
+
+/** Which conversation channels need which purchased channel. */
+export function requiredChannel(conversationChannel: string): ChannelId[] {
+  switch (conversationChannel) {
+    case "web":
+      return ["web"];
+    case "web_voice":
+      return ["voice"];
+    case "whatsapp":
+      return ["whatsapp", "voice"]; // either is enough to open a WhatsApp conversation
+    default:
+      return ["voice"];
+  }
+}
+
+/** Checks whether a company may start a new conversation on a channel. */
+export async function canStartConversation(tenantId: string, conversationChannel: string): Promise<LimitCheck> {
+  const tenant = await loadTenant(tenantId);
   if (!tenant) return { ok: false, reason: "Unknown account" };
-  if (tenant.plan === "trial" && new Date(tenant.trial_ends_at) < new Date()) return { ok: false, reason: "Trial has ended" };
-  if (tenant.plan_status !== "active" && tenant.plan_status !== "trialing") return { ok: false, reason: "Subscription is not active" };
-  const plan = getPlan(tenant.plan);
+  if (tenant.status !== "active") return { ok: false, reason: "Account is suspended" };
+  if (!requiredChannel(conversationChannel).some((c) => tenant.channels.includes(c))) {
+    return { ok: false, reason: `Channel ${conversationChannel} is not enabled for this account` };
+  }
   const usage = await monthUsage(tenantId);
-  if (usage.conversations >= plan.conversationsPerMonth) return { ok: false, reason: "Monthly conversation limit reached" };
-  if (channel === "phone" && usage.voiceMinutes >= plan.voiceMinutesPerMonth) return { ok: false, reason: "Monthly voice minutes used up" };
+  if (usage.conversations >= getPlan(tenant.plan).conversationsPerMonth) return { ok: false, reason: "Monthly conversation limit reached" };
   return { ok: true };
+}
+
+/** Checks whether a company may process another voice note this month. */
+export async function canUseVoice(tenantId: string): Promise<LimitCheck> {
+  const tenant = await loadTenant(tenantId);
+  if (!tenant || tenant.status !== "active") return { ok: false, reason: "Account is not active" };
+  if (!tenant.channels.includes("voice")) return { ok: false, reason: "Voice is not enabled for this account" };
+  const usage = await monthUsage(tenantId);
+  if (usage.voiceNotes >= getPlan(tenant.plan).voiceNotesPerMonth) return { ok: false, reason: "Monthly voice note limit reached" };
+  return { ok: true };
+}
+
+export async function tenantChannels(tenantId: string): Promise<ChannelId[]> {
+  return (await loadTenant(tenantId))?.channels ?? [];
 }

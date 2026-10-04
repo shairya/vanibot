@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import twilio from "twilio";
 import { config } from "../config.js";
-import { one } from "../db.js";
+import { asSystem, one, setRequestTenant } from "../db.js";
 import { resolveBotConfig } from "../core/botConfig.js";
 import { getConversation, LimitError, startConversation, type BotRow } from "../core/conversations.js";
 import { runTurnToText } from "../core/orchestrator.js";
@@ -24,10 +24,10 @@ function twiml(reply: FastifyReply, inner: string) {
 }
 
 function verifyTwilio(req: FastifyRequest): boolean {
-  if (!config.twilioAuthToken) return true; // local development without Twilio credentials
+  if (!config.phone.twilioAuthToken) return true; // local development without Twilio credentials
   const signature = req.headers["x-twilio-signature"];
   if (typeof signature !== "string") return false;
-  return twilio.validateRequest(config.twilioAuthToken, signature, config.publicUrl + req.url, req.body as TwilioBody);
+  return twilio.validateRequest(config.phone.twilioAuthToken, signature, config.publicUrl + req.url, req.body as TwilioBody);
 }
 
 function gather(conversationId: string, lang: string, voice: string, say: string) {
@@ -44,13 +44,13 @@ export async function voiceRoutes(app: FastifyInstance) {
   app.post("/v1/voice/twilio/incoming", async (req, reply) => {
     if (!verifyTwilio(req)) return reply.code(403).send("Invalid signature");
     const body = req.body as TwilioBody;
-    const bot = await one<BotRow>(
-      "SELECT id, tenant_id, name, industry, config, is_active, allowed_domains FROM bots WHERE phone_number = $1 AND is_active",
-      [body.To],
+    const bot = await asSystem(() =>
+      one<BotRow>("SELECT id, tenant_id, name, industry, config, is_active, allowed_domains FROM bots WHERE phone_number = $1 AND is_active", [body.To]),
     );
+    if (bot) setRequestTenant(bot.tenant_id);
     if (!bot) return twiml(reply, "<Say>Sorry, this number is not set up yet. Goodbye.</Say><Hangup/>");
     const cfg = resolveBotConfig(bot);
-    if (!cfg.voice.enabled) return twiml(reply, "<Say>Sorry, phone support is not available. Goodbye.</Say><Hangup/>");
+    if (!cfg.voice.enabled || !cfg.channels.voice) return twiml(reply, "<Say>Sorry, phone support is not available. Goodbye.</Say><Hangup/>");
     try {
       const conv = await startConversation(bot, "phone", { caller: body.From, externalId: body.CallSid });
       return twiml(reply, gather(conv.id, cfg.voice.lang, cfg.voice.phoneVoice, cfg.greeting));
@@ -63,8 +63,9 @@ export async function voiceRoutes(app: FastifyInstance) {
   app.post<{ Querystring: { conversation: string; silence?: string } }>("/v1/voice/twilio/turn", async (req, reply) => {
     if (!verifyTwilio(req)) return reply.code(403).send("Invalid signature");
     const body = req.body as TwilioBody;
-    const row = await one("SELECT bot_id FROM conversations WHERE id = $1 AND channel = 'phone'", [req.query.conversation]);
+    const row = await asSystem(() => one("SELECT bot_id, tenant_id FROM conversations WHERE id = $1 AND channel = 'phone'", [req.query.conversation]));
     if (!row) return twiml(reply, "<Hangup/>");
+    setRequestTenant(row.tenant_id);
     const conv = await getConversation(req.query.conversation, row.bot_id);
     const bot = await one<BotRow>("SELECT id, tenant_id, name, industry, config, is_active, allowed_domains FROM bots WHERE id = $1", [row.bot_id]);
     if (!conv || !bot) return twiml(reply, "<Hangup/>");
@@ -85,8 +86,9 @@ export async function voiceRoutes(app: FastifyInstance) {
     if (!verifyTwilio(req)) return reply.code(403).send("Invalid signature");
     const body = req.body as TwilioBody;
     if (body.CallStatus !== "completed") return { ok: true };
-    const conv = await one("SELECT id, tenant_id, bot_id FROM conversations WHERE external_id = $1 AND channel = 'phone'", [body.CallSid]);
+    const conv = await asSystem(() => one("SELECT id, tenant_id, bot_id FROM conversations WHERE external_id = $1 AND channel = 'phone'", [body.CallSid]));
     if (conv) {
+      setRequestTenant(conv.tenant_id);
       const minutes = Math.max(1, Math.ceil(Number(body.CallDuration ?? 0) / 60));
       await recordUsage(conv.tenant_id, conv.bot_id, "voice_minute", minutes);
       await one("UPDATE conversations SET status = CASE WHEN status = 'open' THEN 'closed' ELSE status END WHERE id = $1", [conv.id]);

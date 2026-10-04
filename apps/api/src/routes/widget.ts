@@ -1,11 +1,11 @@
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import { config } from "../config.js";
-import { one, query } from "../db.js";
+import { asSystem, one, query, setRequestTenant } from "../db.js";
 import { resolveBotConfig } from "../core/botConfig.js";
 import { getConversation, LimitError, startConversation, type BotRow } from "../core/conversations.js";
 import { runTurn } from "../core/orchestrator.js";
-import { getPlan } from "../core/plans.js";
+import { getPlan, tenantChannels } from "../core/plans.js";
 
 // Public endpoints used by the embeddable widget. Authenticated by the bot's public key + allowed domains.
 
@@ -23,10 +23,19 @@ function originAllowed(bot: BotRow, req: FastifyRequest): boolean {
   return bot.allowed_domains.some((d) => host === d || host.endsWith("." + d));
 }
 
+/** Which widget modes are on: the company's plan and the bot's own switches must both allow them. */
+async function widgetModes(bot: BotRow) {
+  const cfg = resolveBotConfig(bot);
+  const channels = await tenantChannels(bot.tenant_id);
+  return { chat: channels.includes("web") && cfg.channels.web, voice: channels.includes("voice") && cfg.channels.voice };
+}
+
 async function loadBot(req: FastifyRequest<{ Params: { key: string } }>, reply: FastifyReply): Promise<BotRow | null> {
-  const bot = await one<BotRow>("SELECT id, tenant_id, name, industry, config, is_active, allowed_domains FROM bots WHERE public_key = $1", [
-    req.params.key,
-  ]);
+  // The public key identifies the company, so this one lookup runs as the platform; everything after is scoped to it.
+  const bot = await asSystem(() =>
+    one<BotRow>("SELECT id, tenant_id, name, industry, config, is_active, allowed_domains FROM bots WHERE public_key = $1", [req.params.key]),
+  );
+  if (bot) setRequestTenant(bot.tenant_id);
   if (!bot || !bot.is_active) {
     reply.code(404).send({ error: "This assistant is not available." });
     return null;
@@ -44,13 +53,16 @@ export async function widgetRoutes(app: FastifyInstance) {
     if (!bot) return;
     const cfg = resolveBotConfig(bot);
     const tenant = await one("SELECT plan FROM tenants WHERE id = $1", [bot.tenant_id]);
+    const modes = await widgetModes(bot);
+    if (!modes.chat && !modes.voice) return reply.code(404).send({ error: "This assistant is not available." });
     return {
       botName: cfg.botName,
       companyName: cfg.companyName,
       greeting: cfg.greeting,
       suggestedQuestions: cfg.suggestedQuestions,
       theme: cfg.theme,
-      voice: { enabled: cfg.voice.enabled, lang: cfg.voice.lang },
+      chat: modes.chat,
+      voice: { enabled: modes.voice, lang: cfg.voice.lang },
       showBranding: !getPlan(tenant.plan).removeBranding,
     };
   });
@@ -61,6 +73,8 @@ export async function widgetRoutes(app: FastifyInstance) {
     const body = z
       .object({ visitorId: z.string().max(100).optional(), channel: z.enum(["web", "web_voice"]).default("web") })
       .parse(req.body ?? {});
+    const modes = await widgetModes(bot);
+    if (!(body.channel === "web" ? modes.chat : modes.voice)) return reply.code(403).send({ error: "This option is not available for this assistant." });
     try {
       const conv = await startConversation(bot, body.channel, { visitorId: body.visitorId });
       return { conversationId: conv.id };

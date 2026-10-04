@@ -1,12 +1,14 @@
 import { createHmac } from "node:crypto";
-import { one, query } from "../db.js";
+import { asSystem, currentTenantId, one, query, withTenant } from "../db.js";
 
 // A tiny Postgres-backed job queue: no Redis needed for local development or small deployments.
 
-export type JobKind = "ingest_document" | "deliver_webhook";
+export type JobKind = "ingest_document" | "deliver_webhook" | "whatsapp_inbound" | "retention_cleanup";
 
-export async function enqueue(kind: JobKind, payload: Record<string, unknown>, tenantId?: string) {
-  await query("INSERT INTO jobs(kind, payload, tenant_id) VALUES ($1, $2, $3)", [kind, payload, tenantId ?? null]);
+/** Queues a job. Company jobs carry their tenant and later run inside that company's isolation context. */
+export async function enqueue(kind: JobKind, payload: Record<string, unknown>, tenantId?: string | null) {
+  const tenant = tenantId === undefined ? currentTenantId() : tenantId;
+  await query("INSERT INTO jobs(kind, payload, tenant_id) VALUES ($1, $2, $3)", [kind, payload, tenant]);
 }
 
 type Handler = (payload: any) => Promise<void>;
@@ -18,15 +20,16 @@ export function registerJobHandler(kind: JobKind, handler: Handler) {
 
 const MAX_ATTEMPTS = 6;
 
+// Claiming crosses companies, so it runs as the platform; the handler then runs as the job's company only.
 async function claimJob() {
-  return one(
+  return asSystem(() => one(
     `UPDATE jobs SET status = 'running', attempts = attempts + 1
      WHERE id = (
        SELECT id FROM jobs WHERE status = 'queued' AND run_at <= now()
        ORDER BY run_at FOR UPDATE SKIP LOCKED LIMIT 1
      )
-     RETURNING id, kind, payload, attempts`,
-  );
+     RETURNING id, kind, payload, attempts, tenant_id`,
+  ));
 }
 
 export async function runOneJob(): Promise<boolean> {
@@ -35,16 +38,21 @@ export async function runOneJob(): Promise<boolean> {
   const handler = handlers.get(job.kind);
   try {
     if (!handler) throw new Error(`No handler for job kind ${job.kind}`);
-    await handler(job.payload);
-    await query("UPDATE jobs SET status = 'done', last_error = NULL WHERE id = $1", [job.id]);
+    if (job.tenant_id) await withTenant(job.tenant_id, () => handler(job.payload));
+    else await asSystem(() => handler(job.payload));
+    await asSystem(() => query("UPDATE jobs SET status = 'done', last_error = NULL WHERE id = $1", [job.id]));
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     const giveUp = job.attempts >= MAX_ATTEMPTS;
     // Exponential backoff: 30s, 1m, 2m, 4m, 8m
     const delaySeconds = 30 * 2 ** (job.attempts - 1);
-    await query(
-      `UPDATE jobs SET status = $2, last_error = $3, run_at = now() + ($4 || ' seconds')::interval WHERE id = $1`,
-      [job.id, giveUp ? "failed" : "queued", message.slice(0, 2000), String(delaySeconds)],
+    await asSystem(() =>
+      query(`UPDATE jobs SET status = $2, last_error = $3, run_at = now() + ($4 || ' seconds')::interval WHERE id = $1`, [
+        job.id,
+        giveUp ? "failed" : "queued",
+        message.slice(0, 2000),
+        String(delaySeconds),
+      ]),
     );
   }
   return true;
@@ -52,6 +60,15 @@ export async function runOneJob(): Promise<boolean> {
 
 export function startWorker(log: { error: (o: unknown, msg: string) => void }) {
   let stopped = false;
+  // Data retention: once an hour, queue a cleanup unless one is already waiting.
+  const scheduleCleanup = () =>
+    asSystem(async () => {
+      const waiting = await one("SELECT 1 FROM jobs WHERE kind = 'retention_cleanup' AND status IN ('queued', 'running')");
+      if (!waiting) await enqueue("retention_cleanup", {}, null);
+    }).catch((err) => log.error(err, "could not schedule retention cleanup"));
+  void scheduleCleanup();
+  const cleanupTimer = setInterval(scheduleCleanup, 60 * 60 * 1000);
+  cleanupTimer.unref();
   const loop = async () => {
     while (!stopped) {
       try {
@@ -66,6 +83,7 @@ export function startWorker(log: { error: (o: unknown, msg: string) => void }) {
   void loop();
   return () => {
     stopped = true;
+    clearInterval(cleanupTimer);
   };
 }
 
@@ -99,4 +117,16 @@ registerJobHandler("deliver_webhook", async (p) => {
     signal: AbortSignal.timeout(10_000),
   });
   if (!res.ok) throw new Error(`Webhook responded ${res.status}`);
+});
+
+// ---- Data retention ----
+// Deletes each company's conversations (with their messages) older than its retention period, plus old job and
+// WhatsApp de-duplication rows. Leads are kept: they belong to the company until it deletes them.
+registerJobHandler("retention_cleanup", async () => {
+  await query(
+    `DELETE FROM conversations c USING tenants t
+      WHERE c.tenant_id = t.id AND c.updated_at < now() - make_interval(days => t.data_retention_days)`,
+  );
+  await query("DELETE FROM whatsapp_inbound WHERE created_at < now() - interval '7 days'");
+  await query("DELETE FROM jobs WHERE status IN ('done', 'failed') AND created_at < now() - interval '30 days'");
 });

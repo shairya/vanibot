@@ -2,9 +2,9 @@ import { useEffect, useState } from "react";
 import { api } from "./api";
 import { useLoad } from "./pages";
 
-type Tab = "setup" | "knowledge" | "install" | "voice";
+type Tab = "setup" | "knowledge" | "channels" | "whatsapp" | "install" | "voice";
 
-export function BotPage({ id }: { id: string }) {
+export function BotPage({ id, me }: { id: string; me: any }) {
   const bot = useLoad<any>(`/api/bots/${id}`, [id]);
   const [tab, setTab] = useState<Tab>("setup");
   if (bot.error) return <div className="error">{bot.error}</div>;
@@ -23,8 +23,10 @@ export function BotPage({ id }: { id: string }) {
           [
             ["setup", "Behaviour"],
             ["knowledge", "Knowledge"],
-            ["install", "Install & leads"],
-            ["voice", "Phone voice"],
+            ["channels", "Channels & language"],
+            ["whatsapp", "WhatsApp"],
+            ["install", "Website & leads"],
+            ...(me.features.phone ? [["voice", "Phone calls"]] : []),
           ] as [Tab, string][]
         ).map(([t, label]) => (
           <button key={t} className={tab === t ? "on" : ""} onClick={() => setTab(t)}>{label}</button>
@@ -32,6 +34,8 @@ export function BotPage({ id }: { id: string }) {
       </div>
       {tab === "setup" && <SetupTab bot={b} onSaved={bot.reload} />}
       {tab === "knowledge" && <KnowledgeTab botId={id} />}
+      {tab === "channels" && <ChannelsTab bot={b} me={me} onSaved={bot.reload} />}
+      {tab === "whatsapp" && <WhatsAppTab bot={b} me={me} onSaved={bot.reload} />}
       {tab === "install" && <InstallTab bot={b} onSaved={bot.reload} />}
       {tab === "voice" && <VoiceTab bot={b} onSaved={bot.reload} />}
     </>
@@ -307,8 +311,8 @@ function VoiceTab({ bot, onSaved }: { bot: any; onSaved: () => void }) {
         <h2>Voice</h2>
         <p><label><input type="checkbox" checked={s.enabled} onChange={(e) => setS({ ...s, enabled: e.target.checked })} /> Enable voice (microphone in the website widget and phone calls)</label></p>
         <div className="grid2">
-          <div><label>Language</label><input value={s.lang} onChange={(e) => setS({ ...s, lang: e.target.value })} /><div className="hint">e.g. en-US, en-IN, hi-IN, es-US</div></div>
-          <div><label>Phone voice</label><input value={s.phoneVoice} onChange={(e) => setS({ ...s, phoneVoice: e.target.value })} /><div className="hint">A Twilio voice name, e.g. Polly.Joanna or Google.en-US-Neural2-F</div></div>
+          <div><label>Language</label><input value={s.lang} onChange={(e) => setS({ ...s, lang: e.target.value })} /><div className="hint">e.g. en-IN, hi-IN, ta-IN</div></div>
+          <div><label>Phone voice</label><input value={s.phoneVoice} onChange={(e) => setS({ ...s, phoneVoice: e.target.value })} /><div className="hint">A Twilio voice name, e.g. Polly.Aditi or Google.hi-IN-Neural2-A</div></div>
         </div>
       </div>
       <div className="card">
@@ -325,6 +329,116 @@ function VoiceTab({ bot, onSaved }: { bot: any; onSaved: () => void }) {
       </div>
       {view}
       <button disabled={busy} onClick={() => save({ phone_number: s.phone.trim(), config: { ...bot.config, voice: { enabled: s.enabled, lang: s.lang, phoneVoice: s.phoneVoice } } })}>Save changes</button>
+    </>
+  );
+}
+
+const LANGUAGES: [string, string][] = [
+  ["en-IN", "English"], ["hi-IN", "Hindi"], ["bn-IN", "Bengali"], ["ta-IN", "Tamil"], ["te-IN", "Telugu"], ["mr-IN", "Marathi"],
+  ["gu-IN", "Gujarati"], ["kn-IN", "Kannada"], ["ml-IN", "Malayalam"], ["pa-IN", "Punjabi"], ["od-IN", "Odia"],
+];
+
+function ChannelsTab({ bot, me, onSaved }: { bot: any; me: any; onSaved: () => void }) {
+  const r = bot.resolved;
+  const [ch, setCh] = useState<Record<"web" | "whatsapp" | "voice", boolean>>({ ...r.channels });
+  const [lang, setLang] = useState(r.defaultLanguage);
+  const [speaker, setSpeaker] = useState(r.voice.speaker);
+  const { save, busy, view } = useSaver(bot.id, onSaved);
+  const bought: string[] = me.tenant.channels;
+  const rows: ["web" | "whatsapp" | "voice", string, string][] = [
+    ["web", "Website chat", "The chat bubble on your website."],
+    ["whatsapp", "WhatsApp chat", "Customers message your WhatsApp Business number and get typed replies."],
+    ["voice", "Voice", "Customers can send WhatsApp voice notes (the bot replies with a voice note and text) and talk to the website bubble."],
+  ];
+  return (
+    <>
+      <div className="card">
+        <h2>Channels for this bot</h2>
+        {rows.map(([key, label, help]) => {
+          const allowed = bought.includes(key);
+          return (
+            <label className="switch" key={key} style={{ fontWeight: 400 }}>
+              <input type="checkbox" disabled={!allowed} checked={allowed && ch[key]} onChange={(e) => setCh({ ...ch, [key]: e.target.checked })} />
+              <span>
+                <b>{label}</b>
+                <div className="hint">{allowed ? help : "Not included in your plan. Contact the vanibot team to add it."}</div>
+              </span>
+            </label>
+          );
+        })}
+      </div>
+      <div className="card">
+        <h2>Language</h2>
+        <div className="grid2">
+          <div>
+            <label>Default language</label>
+            <select value={lang} onChange={(e) => setLang(e.target.value)}>
+              {LANGUAGES.map(([code, name]) => <option key={code} value={code}>{name}</option>)}
+            </select>
+            <div className="hint">The bot always replies in the customer's language (including Hinglish). This is used when it can't tell.</div>
+          </div>
+          <div>
+            <label>Voice for spoken replies</label>
+            <input value={speaker} onChange={(e) => setSpeaker(e.target.value)} placeholder="Server default" />
+            <div className="hint">A Sarvam voice name, e.g. anushka or abhilash. Leave empty for the default.</div>
+          </div>
+        </div>
+      </div>
+      {view}
+      <button disabled={busy} onClick={() => save({ config: { ...bot.config, channels: ch, defaultLanguage: lang, voice: { ...(bot.config.voice ?? {}), speaker: speaker.trim() } } })}>
+        Save changes
+      </button>
+    </>
+  );
+}
+
+function WhatsAppTab({ bot, me, onSaved }: { bot: any; me: any; onSaved: () => void }) {
+  const [s, setS] = useState({
+    phoneNumberId: bot.whatsapp_phone_number_id ?? "",
+    display: bot.whatsapp_display_number ?? "",
+    waba: bot.whatsapp_business_account_id ?? "",
+    token: "",
+  });
+  const { save, busy, view } = useSaver(bot.id, onSaved);
+  const set = (k: keyof typeof s) => (e: { target: { value: string } }) => setS({ ...s, [k]: e.target.value });
+  const included = me.tenant.channels.includes("whatsapp") || me.tenant.channels.includes("voice");
+  return (
+    <>
+      {!included && <div className="card muted">WhatsApp is not included in your plan. Contact the vanibot team to add it.</div>}
+      <div className="card">
+        <h2>Connect your WhatsApp Business number</h2>
+        <p className="muted">vanibot uses Meta's official WhatsApp Cloud API. You need a Meta Business account and a phone number that is not already on the WhatsApp app.</p>
+        <ol className="steps">
+          <li>In Meta for Developers, open the vanibot app's WhatsApp setup (the vanibot team adds your number), or your own app if you have one.</li>
+          <li>Webhook callback URL: <code>{me.features.whatsappWebhookUrl}</code> with the verify token from the vanibot team. Subscribe to <b>messages</b>.</li>
+          <li>Copy the <b>Phone number ID</b> and <b>WhatsApp Business Account ID</b> from the API setup page into the fields below.</li>
+          <li>Create a permanent access token (a System User token with whatsapp_business_messaging permission) and paste it below.</li>
+        </ol>
+        <div className="grid2">
+          <div><label>Phone number ID</label><input value={s.phoneNumberId} onChange={set("phoneNumberId")} placeholder="e.g. 106540352242922" /></div>
+          <div><label>WhatsApp number (shown to your team)</label><input value={s.display} onChange={set("display")} placeholder="+91 98xxx xxxxx" /></div>
+          <div><label>WhatsApp Business Account ID</label><input value={s.waba} onChange={set("waba")} placeholder="e.g. 102290129340398" /></div>
+          <div>
+            <label>Access token</label>
+            <input type="password" value={s.token} onChange={set("token")} placeholder={bot.whatsapp_token_set ? "Saved. Paste a new one to replace it" : "Paste the token"} />
+            <div className="hint">Stored encrypted and never shown again. Without a token, replies are only written to the server log (test mode).</div>
+          </div>
+        </div>
+      </div>
+      {view}
+      <button
+        disabled={busy}
+        onClick={() =>
+          save({
+            whatsapp_phone_number_id: s.phoneNumberId.trim(),
+            whatsapp_display_number: s.display.trim(),
+            whatsapp_business_account_id: s.waba.trim(),
+            ...(s.token.trim() ? { whatsapp_access_token: s.token.trim() } : {}),
+          })
+        }
+      >
+        Save changes
+      </button>
     </>
   );
 }

@@ -30,7 +30,7 @@ function fieldSchema(f: LeadField) {
 export function buildToolDefs(cfg: ResolvedBotConfig, channel: Channel): ToolDef[] {
   const tools: ToolDef[] = [];
   if (cfg.actions.captureLead) {
-    const required = cfg.leadFields.filter((f) => f.required && !(channel === "phone" && f.type === "phone")).map((f) => f.key);
+    const required = cfg.leadFields.filter((f) => f.required && !((channel === "phone" || channel === "whatsapp") && f.type === "phone")).map((f) => f.key);
     tools.push({
       name: "capture_lead",
       description:
@@ -87,7 +87,7 @@ export async function runTool(name: string, rawInput: unknown, defs: ToolDef[], 
     if (consent !== true) {
       return { result: "The visitor has not agreed to the consent statement. Ask for consent before capturing.", isError: true };
     }
-    if (ctx.channel === "phone" && ctx.caller && !fields.phone) fields.phone = ctx.caller;
+    if ((ctx.channel === "phone" || ctx.channel === "whatsapp") && ctx.caller && !fields.phone) fields.phone = ctx.caller;
     fields.summary = summary;
     const lead = await one<{ id: string; created_at: Date }>(
       `INSERT INTO leads(tenant_id, bot_id, conversation_id, fields, consent) VALUES ($1, $2, $3, $4, true) RETURNING id, created_at`,

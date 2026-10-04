@@ -3,11 +3,12 @@ import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { hashPassword, requireAuth, signToken, verifyPassword } from "../auth.js";
 import { config } from "../config.js";
-import { one, query, withTransaction } from "../db.js";
+import { asSystem, one, query, withTransaction } from "../db.js";
 import { botConfigOverridesSchema, resolveBotConfig } from "../core/botConfig.js";
 import { extractText } from "../core/ingest.js";
 import { enqueue, signWebhook } from "../core/jobs.js";
 import { getPlan, monthUsage, plans } from "../core/plans.js";
+import { encryptSecret } from "../core/secrets.js";
 import { templates } from "../templates/index.js";
 
 const newPublicKey = () => "pk_" + randomBytes(16).toString("hex");
@@ -39,11 +40,13 @@ export async function adminRoutes(app: FastifyInstance) {
       }),
       req.body,
     );
-    const exists = await one("SELECT 1 FROM users WHERE email = $1", [body.email]);
+    // Sign-up creates a new company, so it runs as the platform. New companies start on the pilot plan.
+    const exists = await asSystem(() => one("SELECT 1 FROM users WHERE email = $1", [body.email]));
     if (exists) return reply.code(409).send({ error: "An account with this email already exists." });
     const passwordHash = await hashPassword(body.password);
-    const user = await withTransaction(async (db) => {
-      const tenant = (await db.query("INSERT INTO tenants(name) VALUES ($1) RETURNING id", [body.company])).rows[0];
+    const pilot = getPlan("pilot");
+    const user = await asSystem(() => withTransaction(async (db) => {
+      const tenant = (await db.query("INSERT INTO tenants(name, plan, channels) VALUES ($1, $2, $3) RETURNING id", [body.company, pilot.id, pilot.channels])).rows[0];
       return (
         await db.query("INSERT INTO users(tenant_id, email, password_hash, name) VALUES ($1, $2, $3, $4) RETURNING id, tenant_id, email", [
           tenant.id,
@@ -52,13 +55,13 @@ export async function adminRoutes(app: FastifyInstance) {
           body.name,
         ])
       ).rows[0];
-    });
+    }));
     return { token: signToken({ userId: user.id, tenantId: user.tenant_id, email: user.email }) };
   });
 
   app.post("/api/auth/login", async (req, reply) => {
     const body = parse(z.object({ email: z.string().email().toLowerCase(), password: z.string() }), req.body);
-    const user = await one("SELECT id, tenant_id, email, password_hash FROM users WHERE email = $1", [body.email]);
+    const user = await asSystem(() => one("SELECT id, tenant_id, email, password_hash FROM users WHERE email = $1", [body.email]));
     if (!user || !(await verifyPassword(body.password, user.password_hash))) {
       return reply.code(401).send({ error: "Wrong email or password." });
     }
@@ -75,15 +78,17 @@ export async function adminRoutes(app: FastifyInstance) {
 
     secured.get("/api/me", async (req) => {
       const t = req.user!.tenantId;
-      const tenant = await one("SELECT id, name, plan, plan_status, trial_ends_at, stripe_customer_id FROM tenants WHERE id = $1", [t]);
-      const user = await one("SELECT id, email, name, role FROM users WHERE id = $1", [req.user!.userId]);
+      const tenant = await one("SELECT id, name, plan, status, channels, default_language, data_retention_days FROM tenants WHERE id = $1", [t]);
+      // The user row lives in the user's own company, which differs from the acting company when a team member acts for another.
+      const user = await asSystem(() => one("SELECT id, tenant_id, email, name, role, is_platform_admin FROM users WHERE id = $1", [req.user!.userId]));
       return {
         user,
-        tenant: { ...tenant, stripe_customer_id: undefined, hasBilling: Boolean(tenant.stripe_customer_id) },
+        tenant,
+        actingAs: req.user!.tenantId !== req.user!.homeTenantId,
         plan: getPlan(tenant.plan),
-        plans: Object.values(plans).filter((p) => p.id !== "trial"),
+        plans: Object.values(plans),
         usage: await monthUsage(t),
-        billingEnabled: Boolean(config.stripe.secretKey),
+        features: { phone: config.phone.enabled, whatsappWebhookUrl: `${config.publicUrl}/v1/whatsapp/webhook` },
       };
     });
 
@@ -113,14 +118,17 @@ export async function adminRoutes(app: FastifyInstance) {
     });
 
     secured.get<{ Params: { id: string } }>("/api/bots/:id", async (req, reply) => {
-      const bot = await one("SELECT * FROM bots WHERE id = $1 AND tenant_id = $2", [req.params.id, req.user!.tenantId]);
-      if (!bot) return reply.code(404).send({ error: "Bot not found." });
+      const row = await one("SELECT * FROM bots WHERE id = $1 AND tenant_id = $2", [req.params.id, req.user!.tenantId]);
+      if (!row) return reply.code(404).send({ error: "Bot not found." });
+      const { whatsapp_access_token_enc, ...bot } = row; // the token is never sent back
       return {
         ...bot,
+        whatsapp_token_set: Boolean(whatsapp_access_token_enc),
         resolved: resolveBotConfig(bot),
         embedSnippet: embedSnippet(bot.public_key),
         demoUrl: `${config.publicUrl}/demo/${bot.public_key}`,
-        voiceWebhookUrl: `${config.publicUrl}/v1/voice/twilio/incoming`,
+        whatsappWebhookUrl: `${config.publicUrl}/v1/whatsapp/webhook`,
+        voiceWebhookUrl: config.phone.enabled ? `${config.publicUrl}/v1/voice/twilio/incoming` : null,
       };
     });
 
@@ -134,6 +142,10 @@ export async function adminRoutes(app: FastifyInstance) {
           webhook_url: z.string().url().nullable().or(z.literal("")).optional(),
           phone_number: z.string().regex(/^\+[1-9]\d{6,14}$/, "Use E.164 format, e.g. +15551234567").nullable().or(z.literal("")).optional(),
           is_active: z.boolean().optional(),
+          whatsapp_phone_number_id: z.string().regex(/^\d{5,30}$/, "The phone number ID is the long number from Meta's WhatsApp setup page").nullable().or(z.literal("")).optional(),
+          whatsapp_display_number: z.string().max(30).nullable().or(z.literal("")).optional(),
+          whatsapp_business_account_id: z.string().regex(/^\d{5,30}$/, "Use the WhatsApp Business Account ID from Meta").nullable().or(z.literal("")).optional(),
+          whatsapp_access_token: z.string().max(1000).nullable().or(z.literal("")).optional(),
         }),
         req.body,
       );
@@ -151,12 +163,21 @@ export async function adminRoutes(app: FastifyInstance) {
       if (body.webhook_url !== undefined) add("webhook_url", body.webhook_url || null);
       if (body.phone_number !== undefined) add("phone_number", body.phone_number || null);
       if (body.is_active !== undefined) add("is_active", body.is_active);
+      if (body.whatsapp_phone_number_id !== undefined) add("whatsapp_phone_number_id", body.whatsapp_phone_number_id || null);
+      if (body.whatsapp_display_number !== undefined) add("whatsapp_display_number", body.whatsapp_display_number || null);
+      if (body.whatsapp_business_account_id !== undefined) add("whatsapp_business_account_id", body.whatsapp_business_account_id || null);
+      if (body.whatsapp_access_token !== undefined) {
+        if (body.whatsapp_access_token && !/^[0-9a-fA-F]{64}$/.test(config.encryptionKey)) {
+          return reply.code(500).send({ error: "The server has no APP_ENCRYPTION_KEY, so it cannot store WhatsApp tokens." });
+        }
+        add("whatsapp_access_token_enc", body.whatsapp_access_token ? encryptSecret(body.whatsapp_access_token) : null);
+      }
       if (!sets.length) return { ok: true };
       const row = await one(
         `UPDATE bots SET ${sets.join(", ")}, updated_at = now() WHERE id = $1 AND tenant_id = $2 RETURNING id`,
         [req.params.id, req.user!.tenantId, ...values],
       ).catch((err) => {
-        if (err.code === "23505") throw Object.assign(new Error("That phone number is already used by another bot."), { statusCode: 409 });
+        if (err.code === "23505") throw Object.assign(new Error("That phone number is already connected to another bot."), { statusCode: 409 });
         throw err;
       });
       if (!row) return reply.code(404).send({ error: "Bot not found." });

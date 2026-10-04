@@ -24,10 +24,15 @@ export type TurnEvent =
 
 export type ClaudeClient = Pick<Anthropic, "beta">;
 
-let defaultClient: Anthropic | null = null;
+let defaultClient: ClaudeClient | null = null;
 function getClient(): ClaudeClient {
   if (!defaultClient) defaultClient = new Anthropic();
   return defaultClient;
+}
+
+/** For tests: replace the Claude client used when none is passed in. */
+export function setClaudeClient(client: ClaudeClient | null) {
+  defaultClient = client;
 }
 
 const MAX_TOOL_ROUNDS = 4;
@@ -48,10 +53,6 @@ function requestParams(conv: Conversation, messages: Anthropic.Beta.BetaMessageP
     // Cache the stable prefix (system + tools + earlier turns) across turns.
     cache_control: { type: "ephemeral" },
   };
-  if (config.llm.fallbacks) {
-    params.betas = ["server-side-fallback-2026-07-01"];
-    params.fallbacks = "default";
-  }
   return params;
 }
 
@@ -112,7 +113,7 @@ export async function* runTurn(conv: Conversation, userText: string, client: Cla
         .filter((b): b is Anthropic.Beta.BetaTextBlock => b.type === "text")
         .map((b) => b.text)
         .join("");
-      // Pass content back exactly as received (thinking, fallback and tool_use blocks included).
+      // Pass content back exactly as received (thinking and tool_use blocks included).
       messages.push({ role: "assistant", content: message.content as Anthropic.Beta.BetaContentBlockParam[] });
       pending.push({ role: "assistant", content: message.content, display: assistantText || null });
 

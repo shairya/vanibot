@@ -7,6 +7,7 @@ type WidgetConfig = {
   greeting: string;
   suggestedQuestions: string[];
   theme: { color: string; position: "right" | "left" };
+  chat?: boolean; // false = voice-only assistant
   voice: { enabled: boolean; lang: string };
   showBranding: boolean;
 };
@@ -120,6 +121,7 @@ async function main() {
   host.id = "vanibot-widget";
   document.body.appendChild(host);
   const root = host.attachShadow({ mode: "open" });
+  const chatOn = cfg.chat !== false;
   root.innerHTML = `<style>${css(cfg.theme.color, cfg.theme.position)}</style>
     <button class="launcher" aria-label="Open chat">${icons.chat}</button>
     <div class="panel" role="dialog" aria-label="${escapeHtml(cfg.botName)}">
@@ -128,9 +130,13 @@ async function main() {
         <button class="close" aria-label="Close chat">&times;</button></div>
       <div class="messages" aria-live="polite"></div>
       <div class="chips"></div>
-      <form class="composer"><input type="text" placeholder="Type your message..." aria-label="Message" maxlength="2000" />
+      <form class="composer">${
+        chatOn
+          ? '<input type="text" placeholder="Type your message..." aria-label="Message" maxlength="2000" />'
+          : '<input type="text" placeholder="Tap the microphone and speak" aria-label="Message" disabled />'
+      }
         ${cfg.voice.enabled ? `<button type="button" class="icon secondary mic" aria-label="Speak">${icons.mic}</button>` : ""}
-        <button type="submit" class="icon" aria-label="Send">${icons.send}</button></form>
+        ${chatOn ? `<button type="submit" class="icon" aria-label="Send">${icons.send}</button>` : ""}</form>
       ${cfg.showBranding ? '<div class="brand">Powered by vanibot</div>' : ""}
     </div>`;
 
@@ -166,7 +172,7 @@ async function main() {
   };
   const renderChips = (show: boolean) => {
     chips.innerHTML = "";
-    if (!show) return;
+    if (!show || !chatOn) return;
     for (const q of cfg.suggestedQuestions) {
       const b = document.createElement("button");
       b.type = "button";
@@ -200,7 +206,7 @@ async function main() {
     const r = await fetch(`${apiBase}/v1/widget/${botKey}/conversations`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ channel: viaVoice ? "web_voice" : "web", visitorId: getVisitorId() }),
+      body: JSON.stringify({ channel: viaVoice || !chatOn ? "web_voice" : "web", visitorId: getVisitorId() }),
     });
     const body = await r.json();
     if (!r.ok) throw new Error(body.error ?? "Unavailable");

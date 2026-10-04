@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { api, downloadLeadsCsv } from "./api";
+import { api, downloadLeadsCsv, setActAs } from "./api";
 
 export function useLoad<T>(path: string | null, deps: unknown[] = []) {
   const [data, setData] = useState<T | null>(null);
@@ -40,8 +40,8 @@ export function BotsPage({ me }: { me: any }) {
           <div className="stat">{me.usage.conversations} <span className="muted" style={{ fontSize: 14 }}>/ {me.plan.conversationsPerMonth}</span></div>
         </div>
         <div className="card" style={{ flex: 1, marginBottom: 0 }}>
-          <div className="muted">Voice minutes this month</div>
-          <div className="stat">{me.usage.voiceMinutes} <span className="muted" style={{ fontSize: 14 }}>/ {me.plan.voiceMinutesPerMonth}</span></div>
+          <div className="muted">Voice notes this month</div>
+          <div className="stat">{me.usage.voiceNotes} <span className="muted" style={{ fontSize: 14 }}>/ {me.plan.voiceNotesPerMonth}</span></div>
         </div>
         <div className="card" style={{ flex: 1, marginBottom: 0 }}>
           <div className="muted">Plan</div>
@@ -172,55 +172,126 @@ export function ConversationsPage() {
   );
 }
 
-export function BillingPage({ me }: { me: any }) {
-  const [error, setError] = useState("");
-  const status = new URLSearchParams(location.hash.split("?")[1] ?? "").get("status");
-  async function go(path: string, body?: unknown) {
-    setError("");
-    try {
-      const { url } = await api(path, { body: body ?? {} });
-      location.href = url;
-    } catch (e: any) {
-      setError(e.message);
-    }
-  }
+const CHANNEL_LABELS: Record<string, string> = { web: "Website chat", whatsapp: "WhatsApp chat", voice: "Voice (WhatsApp voice notes, website voice)" };
+
+export function PlanPage({ me }: { me: any }) {
   return (
     <>
-      <h1>Plan & billing</h1>
-      {status === "success" && <div className="success">Thanks! Your subscription is active. It can take a few seconds to show here.</div>}
+      <h1>Plan & usage</h1>
       <div className="card">
-        <div className="row" style={{ justifyContent: "space-between" }}>
-          <div>
-            <div className="muted">Current plan</div>
-            <div className="stat">{me.plan.name}</div>
-            {me.tenant.plan === "trial" && <div className="muted">Trial ends {new Date(me.tenant.trial_ends_at).toLocaleDateString()}</div>}
-          </div>
-          {me.tenant.hasBilling && <button className="secondary" onClick={() => go("/api/billing/portal")}>Manage billing</button>}
-        </div>
+        <div className="muted">Current plan</div>
+        <div className="stat">{me.plan.name}</div>
+        <p className="muted">{me.plan.tagline}</p>
+        <p>
+          Switched on for your company:{" "}
+          {me.tenant.channels.length ? me.tenant.channels.map((c: string) => CHANNEL_LABELS[c] ?? c).join(", ") : "nothing yet"}
+        </p>
         <p className="muted">
-          This month: {me.usage.conversations} conversations, {me.usage.voiceMinutes} voice minutes,{" "}
+          This month: {me.usage.conversations.toLocaleString()} of {me.plan.conversationsPerMonth.toLocaleString()} conversations,{" "}
+          {me.usage.voiceNotes.toLocaleString()} of {me.plan.voiceNotesPerMonth.toLocaleString()} voice notes,{" "}
           {(me.usage.inputTokens + me.usage.outputTokens).toLocaleString()} AI tokens.
         </p>
       </div>
-      {!me.billingEnabled && <div className="card muted">Billing isn't configured on this server yet (add the Stripe keys to .env).</div>}
-      {error && <div className="error">{error}</div>}
+      <div className="card muted">Online payments are not switched on during the pilot. To change your plan, contact the vanibot team.</div>
       <div className="plans">
         {me.plans.map((p: any) => (
           <div className="card" key={p.id}>
             <h2>{p.name}</h2>
             <div className="stat">{p.priceLabel}</div>
+            <p className="muted">{p.tagline}</p>
             <ul>
+              {p.channels.map((c: string) => <li key={c}>{CHANNEL_LABELS[c]}</li>)}
               <li>{p.bots} bot{p.bots > 1 ? "s" : ""}</li>
               <li>{p.conversationsPerMonth.toLocaleString()} conversations / month</li>
-              <li>{p.voiceMinutesPerMonth.toLocaleString()} phone voice minutes / month</li>
+              {p.voiceNotesPerMonth > 0 && <li>{p.voiceNotesPerMonth.toLocaleString()} voice notes / month</li>}
               <li>{p.documents} knowledge documents</li>
-              <li>{p.removeBranding ? "No vanibot branding" : "vanibot branding"}</li>
             </ul>
-            <button disabled={!me.billingEnabled || me.tenant.plan === p.id} onClick={() => go("/api/billing/checkout", { plan: p.id })}>
-              {me.tenant.plan === p.id ? "Current plan" : "Choose"}
-            </button>
+            {me.tenant.plan === p.id && <span className="badge active">Current plan</span>}
           </div>
         ))}
+      </div>
+    </>
+  );
+}
+
+// vanibot team console: every company, with plan, channels and status, plus website demo requests.
+export function TeamPage({ me }: { me: any }) {
+  const tenants = useLoad<any[]>("/api/platform/tenants");
+  const demos = useLoad<any[]>("/api/platform/demo-requests");
+  const [error, setError] = useState("");
+  async function update(id: string, body: unknown) {
+    setError("");
+    try {
+      await api(`/api/platform/tenants/${id}`, { method: "PATCH", body });
+      tenants.reload();
+    } catch (e: any) {
+      setError(e.message);
+    }
+  }
+  function actAs(id: string) {
+    setActAs(id === me.user.tenant_id ? null : id);
+    location.hash = "#/";
+    location.reload();
+  }
+  return (
+    <>
+      <h1>vanibot team</h1>
+      {error && <div className="error">{error}</div>}
+      <div className="card">
+        <h2>Companies</h2>
+        <table>
+          <thead><tr><th>Company</th><th>Plan</th><th>Channels</th><th>This month</th><th>Status</th><th></th></tr></thead>
+          <tbody>
+            {tenants.data?.map((t) => (
+              <tr key={t.id}>
+                <td>{t.name}<div className="hint">{t.bots} bots, {t.users} users</div></td>
+                <td>
+                  <select value={t.plan} onChange={(e) => update(t.id, { plan: e.target.value })}>
+                    {me.plans.map((p: any) => <option key={p.id} value={p.id}>{p.name}</option>)}
+                  </select>
+                </td>
+                <td>
+                  {["web", "whatsapp", "voice"].map((c) => (
+                    <label key={c} style={{ fontWeight: 400 }}>
+                      <input
+                        type="checkbox"
+                        checked={t.channels.includes(c)}
+                        onChange={(e) => update(t.id, { channels: e.target.checked ? [...t.channels, c] : t.channels.filter((x: string) => x !== c) })}
+                      />{" "}
+                      {c === "web" ? "Website chat" : c === "whatsapp" ? "WhatsApp" : "Voice"}
+                    </label>
+                  ))}
+                </td>
+                <td>{t.conversations_this_month} conversations<div className="hint">{t.voice_notes_this_month} voice notes</div></td>
+                <td>
+                  <select value={t.status} onChange={(e) => update(t.id, { status: e.target.value })}>
+                    <option value="active">Active</option>
+                    <option value="suspended">Suspended</option>
+                  </select>
+                </td>
+                <td><button className="secondary" onClick={() => actAs(t.id)}>Open</button></td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <div className="card">
+        <h2>Demo requests from the website</h2>
+        {demos.data?.length ? (
+          <table>
+            <thead><tr><th>When</th><th>Name</th><th>Company</th><th>Contact</th><th>Interest</th><th>Message</th></tr></thead>
+            <tbody>
+              {demos.data.map((d) => (
+                <tr key={d.id}>
+                  <td>{fmt(d.created_at)}</td><td>{d.name}</td><td>{d.company}</td>
+                  <td>{d.email}<div className="hint">{d.phone}</div></td><td>{d.interest}</td><td>{d.message}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        ) : (
+          <p className="muted">No demo requests yet.</p>
+        )}
       </div>
     </>
   );

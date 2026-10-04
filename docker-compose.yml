@@ -2,12 +2,13 @@ services:
   db:
     image: pgvector/pgvector:pg16
     environment:
-      POSTGRES_USER: vanibot
-      POSTGRES_PASSWORD: vanibot
-      POSTGRES_DB: vanibot
+      # Superuser for maintenance only. The app uses the "vanibot" role created by docker/initdb.
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
     ports:
       - "5432:5432"
     volumes:
       - vanibot-db:/var/lib/postgresql/data
+      - ./docker/initdb:/docker-entrypoint-initdb.d:ro
 volumes:
   vanibot-db:

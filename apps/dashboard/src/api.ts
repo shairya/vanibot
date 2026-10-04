@@ -8,10 +8,21 @@ export function setToken(token: string | null) {
   else localStorage.removeItem("vanibot:token");
 }
 
+// vanibot team members can act for another company; the API checks they are allowed to.
+export function getActAs() {
+  return localStorage.getItem("vanibot:actAs");
+}
+export function setActAs(tenantId: string | null) {
+  if (tenantId) localStorage.setItem("vanibot:actAs", tenantId);
+  else localStorage.removeItem("vanibot:actAs");
+}
+
 export async function api<T = any>(path: string, opts: { method?: string; body?: unknown; form?: FormData } = {}): Promise<T> {
   const headers: Record<string, string> = {};
   const token = getToken();
   if (token) headers.authorization = `Bearer ${token}`;
+  const actAs = getActAs();
+  if (actAs) headers["x-act-as-tenant"] = actAs;
   if (opts.body !== undefined) headers["content-type"] = "application/json";
   const res = await fetch(base + path, {
     method: opts.method ?? (opts.body !== undefined || opts.form ? "POST" : "GET"),
@@ -29,7 +40,10 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
 }
 
 export async function downloadLeadsCsv() {
-  const res = await fetch(base + "/api/leads.csv", { headers: { authorization: `Bearer ${getToken()}` } });
+  const headers: Record<string, string> = { authorization: `Bearer ${getToken()}` };
+  const actAs = getActAs();
+  if (actAs) headers["x-act-as-tenant"] = actAs;
+  const res = await fetch(base + "/api/leads.csv", { headers });
   const blob = await res.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);

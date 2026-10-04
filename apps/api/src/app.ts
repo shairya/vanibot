@@ -8,12 +8,21 @@ import multipart from "@fastify/multipart";
 import Fastify from "fastify";
 import { ZodError } from "zod";
 import { config } from "./config.js";
-import { pool } from "./db.js";
+import { pool, reenterContext, runInRequestContext, type RequestDbContext } from "./db.js";
 import "./core/ingest.js"; // registers the ingestion job handler
+import "./core/whatsapp.js"; // registers the WhatsApp job handler
 import { adminRoutes } from "./routes/admin.js";
-import { billingRoutes } from "./routes/billing.js";
+import { platformRoutes } from "./routes/platform.js";
+import { publicRoutes } from "./routes/public.js";
 import { voiceRoutes } from "./routes/voice.js";
+import { whatsappRoutes } from "./routes/whatsapp.js";
 import { widgetRoutes } from "./routes/widget.js";
+
+declare module "fastify" {
+  interface FastifyRequest {
+    dbContext?: RequestDbContext;
+  }
+}
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const widgetBundle = path.resolve(here, "../../widget/dist/widget.js");
@@ -25,6 +34,15 @@ export async function buildApp() {
   await app.register(cors, { origin: true, methods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"] });
   await app.register(formbody); // Twilio posts application/x-www-form-urlencoded
   await app.register(multipart, { limits: { fileSize: 20 * 1024 * 1024, files: 1 } });
+
+  // Every request gets its own database isolation context; the company is set once it is known.
+  app.addHook("onRequest", (req, _reply, done) => {
+    req.dbContext = runInRequestContext(done);
+  });
+  app.addHook("preValidation", (req, _reply, done) => {
+    if (req.dbContext) reenterContext(req.dbContext, done);
+    else done();
+  });
 
   app.setErrorHandler((err: any, req, reply) => {
     if (err instanceof ZodError) return reply.code(400).send({ error: err.issues.map((i) => `${i.path.join(".")}: ${i.message}`).join("; ") });
@@ -58,7 +76,10 @@ export async function buildApp() {
 
   await app.register(adminRoutes);
   await app.register(widgetRoutes);
-  await app.register(voiceRoutes);
-  await app.register(billingRoutes);
+  await app.register(publicRoutes);
+  await app.register(platformRoutes);
+  await app.register(whatsappRoutes);
+  // Phone calls are the next phase; the Twilio routes stay off until PHONE_ENABLED=true.
+  if (config.phone.enabled) await app.register(voiceRoutes);
   return app;
 }

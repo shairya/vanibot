@@ -1,6 +1,6 @@
 import { randomBytes } from "node:crypto";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
-import { one, pool, query } from "../src/db.js";
+import { one, pool, query, setScriptContext } from "../src/db.js";
 import { startConversation, type BotRow } from "../src/core/conversations.js";
 import { ingestDocument } from "../src/core/ingest.js";
 import { runTurn } from "../src/core/orchestrator.js";
@@ -10,7 +10,9 @@ let tenantId: string;
 let bot: BotRow;
 
 beforeAll(async () => {
-  tenantId = (await one("INSERT INTO tenants(name, plan) VALUES ('Test Co', 'growth') RETURNING id")).id;
+  setScriptContext({ system: true });
+  tenantId = (await one("INSERT INTO tenants(name, plan) VALUES ('Test Co', 'pilot') RETURNING id")).id;
+  setScriptContext({ tenantId }); // everything below runs as this company only
   bot = (await one(
     `INSERT INTO bots(tenant_id, name, industry, public_key, webhook_secret, webhook_url, config)
      VALUES ($1, 'Testbot', 'medical-bill-discount', $2, 'whsec_test', 'http://127.0.0.1:9/hook', '{"companyName":"Test Co"}')
@@ -26,6 +28,7 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
+  setScriptContext({ system: true });
   await query("DELETE FROM jobs WHERE tenant_id = $1", [tenantId]);
   await query("DELETE FROM tenants WHERE id = $1", [tenantId]);
   await pool.end();

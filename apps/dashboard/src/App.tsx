@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from "react";
-import { api, getToken, setToken } from "./api";
+import { api, getActAs, getToken, setActAs, setToken } from "./api";
 import { BotPage } from "./BotPage";
-import { BillingPage, BotsPage, ConversationsPage, LeadsPage } from "./pages";
+import { BotsPage, ConversationsPage, LeadsPage, PlanPage, TeamPage } from "./pages";
 
 function useHashRoute() {
   const [hash, setHash] = useState(location.hash || "#/");
@@ -20,7 +20,16 @@ export function App() {
 
   useEffect(() => {
     if (!authed) return;
-    api("/api/me").then(setMe).catch(() => setAuthed(false));
+    api("/api/me")
+      .then(setMe)
+      .catch(() => {
+        if (getActAs()) {
+          setActAs(null); // the company we were acting for is gone; fall back to our own
+          return api("/api/me").then(setMe);
+        }
+        setAuthed(false);
+      })
+      .catch(() => setAuthed(false));
   }, [authed, route]);
 
   if (!authed) return <AuthPage onDone={() => setAuthed(true)} />;
@@ -30,14 +39,16 @@ export function App() {
     ["#/", "Bots"],
     ["#/leads", "Leads"],
     ["#/conversations", "Conversations"],
-    ["#/billing", "Plan & billing"],
+    ["#/plan", "Plan & usage"],
+    ...(me.user.is_platform_admin ? [["#/team", "vanibot team"]] : []),
   ];
   const botMatch = route.match(/^\/bots\/([0-9a-f-]+)/);
   let page;
-  if (botMatch) page = <BotPage id={botMatch[1]} />;
+  if (botMatch) page = <BotPage id={botMatch[1]} me={me} />;
   else if (route === "/leads") page = <LeadsPage />;
   else if (route === "/conversations") page = <ConversationsPage />;
-  else if (route === "/billing") page = <BillingPage me={me} />;
+  else if (route === "/plan") page = <PlanPage me={me} />;
+  else if (route === "/team" && me.user.is_platform_admin) page = <TeamPage me={me} />;
   else page = <BotsPage me={me} />;
 
   return (
@@ -59,19 +70,28 @@ export function App() {
           href="#/login"
           onClick={() => {
             setToken(null);
+            setActAs(null);
             setAuthed(false);
           }}
         >
           Log out
         </a>
       </nav>
-      <main>{page}</main>
+      <main>
+        {me.actingAs && (
+          <div className="acting">
+            You are working inside <b>{me.tenant.name}</b> as the vanibot team.{" "}
+            <button className="secondary" onClick={() => { setActAs(null); location.hash = "#/team"; location.reload(); }}>Back to my account</button>
+          </div>
+        )}
+        {page}
+      </main>
     </div>
   );
 }
 
 function AuthPage({ onDone }: { onDone: () => void }) {
-  const [mode, setMode] = useState<"login" | "signup">("login");
+  const [mode, setMode] = useState<"login" | "signup">(location.hash.startsWith("#/signup") ? "signup" : "login");
   const [form, setForm] = useState({ company: "", name: "", email: "", password: "" });
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
@@ -98,7 +118,7 @@ function AuthPage({ onDone }: { onDone: () => void }) {
     <div className="auth">
       <h1>vanibot</h1>
       <form className="card" onSubmit={submit}>
-        <h2>{mode === "login" ? "Log in" : "Start your free trial"}</h2>
+        <h2>{mode === "login" ? "Log in" : "Start your free pilot"}</h2>
         {mode === "signup" && (
           <>
             <p><label>Company name</label><input value={form.company} onChange={set("company")} required /></p>
