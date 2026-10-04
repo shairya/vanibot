@@ -1,0 +1,19 @@
+{
+  "name": "vanibot",
+  "private": true,
+  "version": "0.1.0",
+  "description": "vanibot: multi-tenant chat + voice bot SaaS",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:setup": "pnpm --filter @vanibot/api db:setup",
+    "db:migrate": "pnpm --filter @vanibot/api migrate",
+    "seed": "pnpm --filter @vanibot/api seed",
+    "dev": "pnpm -r --parallel dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test"
+  }
+}
